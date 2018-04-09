@@ -79,6 +79,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <signal.h>
+#include <sys/time.h>
 
 #define MAX_PACKET_SIZE 1024
 #define DEFAULT_SERVER_IPV6 "[::1]"
@@ -118,6 +119,29 @@ void handle_sigint(int signum)
 {
     g_quit = 2;
 }
+
+static lwm2m_context_t *alrmctx = NULL;
+void handle_sigalrm(int signum)
+{
+    char value[15];
+    int valueLength;
+    lwm2m_uri_t uri;
+    static int count = 0;
+
+    if (alrmctx == NULL)
+    {
+	fprintf (stderr, "Don't have a context for observer!\n");
+	return;
+    }
+
+    if (lwm2m_stringToUri("/3/0/9", 6, &uri))
+    {
+	count = (count + 1) % 100;
+	valueLength = sprintf(value, "%d", count);
+	handle_value_changed(alrmctx, &uri, value, valueLength);
+    }
+}
+
 
 void handle_value_changed(lwm2m_context_t * lwm2mH,
                           lwm2m_uri_t * uri,
@@ -790,6 +814,7 @@ void print_usage(void)
     fprintf(stdout, "  -h HOST\tSet the hostname of the LWM2M Server to connect to. Default: localhost\r\n");
     fprintf(stdout, "  -p PORT\tSet the port of the LWM2M Server to connect to. Default: "LWM2M_STANDARD_PORT_STR"\r\n");
     fprintf(stdout, "  -4\t\tUse IPv4 connection. Default: IPv6 connection\r\n");
+    fprintf(stdout, "  -T PERFTIME\tSet the performance measurement update interval in us. Default: 0 (= off)\r\n");
     fprintf(stdout, "  -t TIME\tSet the lifetime of the Client. Default: 300\r\n");
     fprintf(stdout, "  -b\t\tBootstrap requested.\r\n");
     fprintf(stdout, "  -c\t\tChange battery level over time.\r\n");
@@ -812,6 +837,7 @@ int main(int argc, char *argv[])
     char * name = "testlwm2mclient";
     int lifetime = 300;
     int batterylevelchanging = 0;
+    unsigned int performance_updates_us = 0;
     time_t reboot_time = 0;
     int opt;
     bool bootstrapRequested = false;
@@ -825,6 +851,9 @@ int main(int argc, char *argv[])
     char * psk = NULL;
     uint16_t pskLen = -1;
     char * pskBuffer = NULL;
+
+    struct sigaction sa;
+    struct itimerval timer;
 
     /*
      * The function start by setting up the command line interface (which may or not be useful depending on your project)
@@ -888,6 +917,19 @@ int main(int argc, char *argv[])
                 return 0;
             }
             if (1 != sscanf(argv[opt], "%d", &lifetime))
+            {
+                print_usage();
+                return 0;
+            }
+            break;
+        case 'T':
+            opt++;
+            if (opt >= argc)
+            {
+                print_usage();
+                return 0;
+            }
+            if (1 != sscanf(argv[opt], "%d", &performance_updates_us))
             {
                 print_usage();
                 return 0;
@@ -1145,6 +1187,22 @@ int main(int argc, char *argv[])
     }
     fprintf(stdout, "LWM2M Client \"%s\" started on port %s\r\n", name, localPort);
     fprintf(stdout, "> "); fflush(stdout);
+
+    /* Set up a timer for high message throughput observe handling iff enabled */
+    if (performance_updates_us > 0)
+    {
+	alrmctx = lwm2mH;
+	memset (&sa, 0, sizeof (sa));
+	sa.sa_handler = &handle_sigalrm;
+	sigaction (SIGALRM, &sa, NULL);
+
+	timer.it_value.tv_sec = 0;
+	timer.it_value.tv_usec = 1;
+	timer.it_interval.tv_sec = 0;
+	timer.it_interval.tv_usec = performance_updates_us;
+	setitimer (ITIMER_REAL, &timer, NULL);
+    }
+
     /*
      * We now enter in a while loop that will handle the communications from the server
      */
